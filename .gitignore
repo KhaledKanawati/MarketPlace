@@ -1,0 +1,9 @@
+__pycache__/
+marketplace.db
+marketplace.db-journal
+*.sqlite
+*.sqlite3
+venv/
+env/
+.vscode/
+*.log

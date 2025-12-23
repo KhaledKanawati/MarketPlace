@@ -18,7 +18,7 @@ class ChatWindow:
         self.window.geometry("500x600")
         self.window.configure(bg=parent_app.bg_dark)
         self.has_unread = False
-        self.displayed_message_ids = set()
+        self.displayed_message_ids = set()  # prevents duplicates
         self.proposal_denied = False
         
         self.setup_ui()
@@ -70,7 +70,7 @@ class ChatWindow:
             wrap=tk.WORD
         )
         self.chat_display.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-        self.chat_display.tag_config("me", foreground="#4ade80")
+        self.chat_display.tag_config("me", foreground="#4ade80")  # colors for different senders
         self.chat_display.tag_config("them", foreground="#60a5fa")
         
         input_frame = tk.Frame(self.window, bg=self.app.bg_dark)
@@ -78,7 +78,7 @@ class ChatWindow:
         
         self.msg_entry = tk.Entry(input_frame, font=('Segoe UI', 10))
         self.msg_entry.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 5))
-        self.msg_entry.bind('<Return>', lambda e: self.send_message())
+        self.msg_entry.bind('<Return>', lambda e: self.send_message())  # Enter to send
         
         tk.Button(input_frame, text="Send",
                  command=self.send_message,
@@ -98,8 +98,7 @@ class ChatWindow:
                  border=0,
                  padx=10,
                  pady=8).pack(side=tk.LEFT)
-        
-        self.window.protocol("WM_DELETE_WINDOW", self.on_close)
+                # cleanup when window closes        self.window.protocol("WM_DELETE_WINDOW", self.on_close)
     
     def load_history(self):
         """Load chat history from server"""
@@ -283,7 +282,21 @@ class ChatWindow:
             # Widget destroyed
             return
         
-        for sender, message, timestamp in messages:
+        for msg_data in messages:
+            # Handle different message formats
+            try:
+                if len(msg_data) == 3:
+                    sender, message, timestamp = msg_data
+                elif len(msg_data) == 4:
+                    # Format with ID: id, sender, message, timestamp
+                    _, sender, message, timestamp = msg_data
+                else:
+                    print(f"Unknown message format: {msg_data}")
+                    continue
+            except Exception as e:
+                print(f"Error unpacking message: {e}, data: {msg_data}")
+                continue
+            
             # Check if this message was already displayed
             msg_id = f"{sender}:{message[:50]}:{timestamp}"
             if msg_id in self.displayed_message_ids:
@@ -358,9 +371,9 @@ class ChatWindow:
                                 self.app.root.after(0, lambda: self.show_rating_dialog(self.product_name))
                         except:
                             pass
-                        self.app.root.after(0, lambda: messagebox.showinfo("Success", "Purchase confirmed! Stock updated."))
+                        # Don't show success message - rating dialog is confirmation enough
                     else:
-                        self.app.root.after(0, lambda: messagebox.showerror("Error", "Failed to update stock - product may be out of stock"))
+                        self.app.root.after(0, lambda: messagebox.showerror("Error", "Insufficient stock - product may be sold out"))
             except Exception as e:
                 print(f"Error processing confirmation: {e}")
                 self.app.root.after(0, lambda: messagebox.showerror("Error", str(e)))
@@ -408,13 +421,11 @@ class ChatWindow:
             prod_entry.insert(0, "Enter product name")
         prod_entry.pack(pady=5)
         
-        # Quantity
-        tk.Label(dialog, text="Quantity:",
+        # Quantity (fixed at 1)
+        tk.Label(dialog, text="Quantity: 1",
                 bg=self.app.bg_dark,
-                fg=self.app.text_light).pack()
-        qty_entry = tk.Entry(dialog, width=35)
-        qty_entry.insert(0, "1")
-        qty_entry.pack(pady=5)
+                fg=self.app.text_light,
+                font=('Segoe UI', 10, 'bold')).pack(pady=10)
         
         # Date
         tk.Label(dialog, text="Pickup Date (YYYY-MM-DD):",
@@ -432,7 +443,7 @@ class ChatWindow:
         
         def send():
             prod = prod_entry.get().strip()
-            qty = qty_entry.get().strip()
+            qty = "1"  # Fixed quantity
             date = date_entry.get().strip()
             
             if not all([prod, qty, date]):
@@ -648,15 +659,27 @@ class ChatWindow:
                     username_padded = self.other_user.encode('utf-8').ljust(1024, b'\0')
                     self.app.client.send(username_padded)
                     
-                    response = self.app.client.recv(4096).decode('utf-8')
+                    # Get response indicator
+                    response = self.app.client.recv(1).decode('utf-8')
                     
-                    if response.startswith("profile:"):
-                        profile_data = json.loads(response[8:])
+                    if response == '1':
+                        # Get length-prefixed data
+                        length = int.from_bytes(self.app.client.recv(16), 'big')
+                        data = b""
+                        while len(data) < length:
+                            packet = self.app.client.recv(4096)
+                            if not packet:
+                                break
+                            data += packet
+                        
+                        profile_data = json.loads(data.decode('utf-8'))
                         self.app.root.after(0, lambda: self.display_profile(profile_window, loading_label, profile_data))
                     else:
                         self.app.root.after(0, lambda: loading_label.config(text="Failed to load profile"))
             except Exception as e:
                 print(f"Error loading profile: {e}")
+                import traceback
+                traceback.print_exc()
                 self.app.root.after(0, lambda: loading_label.config(text=f"Error: {e}"))
         
         threading.Thread(target=load_profile, daemon=True).start()
@@ -758,6 +781,22 @@ class ChatWindow:
                 del self.app.active_chats[self.other_user]
         except:
             pass
+        
+        # Unregister from server without blocking
+        def unregister():
+            try:
+                with self.app.client_lock:
+                    self.app.client.settimeout(1.0)  # Short timeout
+                    self.app.client.send("27".encode('utf-8'))
+                    user_padded = self.other_user.encode('utf-8').ljust(1024, b'\0')
+                    self.app.client.send(user_padded)
+                    self.app.client.recv(1)  # Acknowledgment
+                    self.app.client.settimeout(30.0)  # Restore normal timeout
+            except:
+                pass  # Ignore timeout or errors on close
+        
+        threading.Thread(target=unregister, daemon=True).start()
+        
         try:
             self.window.destroy()
         except:

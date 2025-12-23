@@ -3,7 +3,6 @@ import threading
 import json
 import sqlite3
 import base64
-import os
 
 conn = sqlite3.connect('marketplace.db')
 cursor = conn.cursor()
@@ -17,7 +16,7 @@ cursor.execute("""CREATE TABLE IF NOT EXISTS productList (
     rating REAL DEFAULT 0,
     quantity INTEGER DEFAULT 1,
     numberOfRating INTEGER DEFAULT 0,
-    UNIQUE(product_name, user_name)
+    UNIQUE(product_name, user_name)  -- allows multiple sellers to have same product name
 )""")
 
 cursor.execute("""CREATE TABLE IF NOT EXISTS infoList (
@@ -49,7 +48,7 @@ cursor.execute("""CREATE TABLE IF NOT EXISTS chat_messages (
     receiver TEXT NOT NULL,
     message TEXT NOT NULL,
     timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-    is_read INTEGER DEFAULT 0
+    is_read INTEGER DEFAULT 0  -- SQLite uses 0/1 for boolean
 )""")
 
 cursor.execute("""CREATE TABLE IF NOT EXISTS transactions (
@@ -73,6 +72,14 @@ cursor.execute("""CREATE TABLE IF NOT EXISTS product_ratings (
     timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
 )""")
 
+# Migration: Add seller column if it doesn't exist
+try:
+    cursor.execute("SELECT seller FROM product_ratings LIMIT 1")
+except sqlite3.OperationalError:
+    print("Migrating product_ratings table - adding seller column...")
+    cursor.execute("ALTER TABLE product_ratings ADD COLUMN seller TEXT NOT NULL DEFAULT ''")
+    print("Migration complete!")
+
 cursor.execute("""CREATE TABLE IF NOT EXISTS buyer_ratings (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     buyer TEXT NOT NULL,
@@ -89,6 +96,7 @@ online_users = {}
 active_chats = {}
 
 def get_connection():
+    # new connection each time - SQLite isn't thread-safe with shared connections
     connection = sqlite3.connect('marketplace.db')
     return connection
 
@@ -177,9 +185,10 @@ def add_product(product_name, username, image, description, price, quantity):
         existing = cursor.fetchone()
         
         if existing:
+            # restock instead of error - just add to quantity
             new_quantity = existing[0] + quantity
             cursor.execute("""UPDATE productList 
-                             SET quantity = ?, image = COALESCE(?, image), 
+                             SET quantity = ?, image = COALESCE(?, image),  -- keeps old image if no new one
                                  description = ?, price = ? 
                              WHERE product_name = ? AND user_name = ?""",
                           (new_quantity, image, description, price, product_name, username))
@@ -263,7 +272,7 @@ def get_chat_history(user1, user2, limit=50):
     messages = cursor.fetchall()
     cursor.close()
     conn.close()
-    return list(reversed(messages))
+    return list(reversed(messages))  # DESC order needs flip for chronological  # DESC order needs flip for chronological  # DESC order needs flip for chronological
 
 def register_online_user(username, client_socket, address, port):
     online_users[username] = {
@@ -287,6 +296,7 @@ def get_conversations(username):
     conn = get_connection()
     cursor = conn.cursor()
     
+    # CASE gets the 'other person' in each message
     cursor.execute("""SELECT DISTINCT 
                      CASE WHEN sender = ? THEN receiver ELSE sender END as conversation_partner
                      FROM chat_messages 
@@ -359,6 +369,8 @@ def decrement_product_stock(product_name, seller, quantity=1):
             conn.close()
             return None
         
+        # Allow decrement even if it results in 0 stock
+        
         cursor.execute("UPDATE productList SET quantity = quantity - ? WHERE product_name = ? AND user_name = ?",
                       (quantity, product_name, seller))
         conn.commit()
@@ -387,7 +399,7 @@ def check_already_purchased(buyer, product_name, seller):
 
 def create_transaction(buyer, seller, product, date, quantity):
     import uuid
-    trans_id = str(uuid.uuid4())[:8]
+    trans_id = str(uuid.uuid4())[:8]  # short ID is easier to display  # short ID is easier to display  # short ID is easier to display
     
     conn = get_connection()
     cursor = conn.cursor()
@@ -493,6 +505,7 @@ def complete_purchase(trans_id, product_name, product_rating, buyer_rating):
         cursor.execute("INSERT INTO buyer_ratings (buyer, rating, rated_by) VALUES (?, ?, ?)",
                       (buyer, buyer_rating, seller))
         
+        # product rating also counts as seller rating
         cursor.execute("INSERT INTO buyer_ratings (buyer, rating, rated_by) VALUES (?, ?, ?)",
                       (seller, product_rating, buyer))
         
@@ -669,7 +682,6 @@ def handle_client(client_socket, address):
             
             try:
                 if request_code == "1":
-                    # Check for purchase history
                     history = get_user_purchase_history(username)
                     if history[username]:
                         client_socket.send(b'1')
@@ -679,13 +691,11 @@ def handle_client(client_socket, address):
                     else:
                         client_socket.send(b'0')
                     
-                    # Wait for ready signal
                     client_socket.recv(1024)
                     
-                    # Send product list
                     products = get_all_products()
                     products_json = json.dumps(products)
-                    client_socket.send(len(products_json).to_bytes(16, 'big'))
+                    client_socket.send(len(products_json).to_bytes(16, 'big'))  # 16-byte length prefix
                     client_socket.sendall(products_json.encode('utf-8'))
             
                 elif request_code == "2":
@@ -696,7 +706,7 @@ def handle_client(client_socket, address):
                     data_length = int.from_bytes(client_socket.recv(16), 'big')
                     product_data = b""
                     
-                    # Receive product data in chunks (for large images)
+                    # receive in chunks to handle large images
                     while len(product_data) < data_length:
                         chunk = client_socket.recv(4096)
                         if not chunk:
@@ -704,36 +714,30 @@ def handle_client(client_socket, address):
                         product_data += chunk
                     
                     try:
-                        # Parse product data: name|image|description|price|quantity
                         data_str = json.loads(product_data.decode('utf-8'))
                         parts = data_str.split('|')
                         prod_name, image_b64, description, price, quantity = parts
                         
-                        # Decode base64 image if present
                         if image_b64 != "No Image":
                             image_binary = base64.b64decode(image_b64)
                         else:
                             image_binary = None
                         
-                        # Add product to database (will restock if already exists for this seller)
                         if add_product(prod_name, username, image_binary, description, float(price), int(quantity)):
-                            client_socket.send(b'1')  # Success
+                            client_socket.send(b'1')
                             print(f"Product '{prod_name}' added by {username}")
                         else:
-                            client_socket.send(b'0')  # Failure
+                            client_socket.send(b'0')
                     except Exception as e:
                         print(f"Error adding product: {e}")
-                        client_socket.send(b'0')  # Send failure response
+                        client_socket.send(b'0')
             
-                elif request_code == "3":  # Product details request
-                    # Receive product name and seller (format: "product_name|seller")
-                    data = client_socket.recv(1024).decode('utf-8').strip('\x00').strip()
+                elif request_code == "3":
+                    data = client_socket.recv(1024).decode('utf-8').strip('\x00').strip()  # removes padding
                     
-                    # Parse data - check if seller is included
                     if '|' in data:
                         product_name, seller = data.split('|', 1)
                     else:
-                        # Backwards compatibility - no seller specified
                         product_name = data
                         seller = None
                     
@@ -746,10 +750,8 @@ def handle_client(client_socket, address):
                         info_str = f"{seller_name}|{description}|{price}|{quantity}"
                         client_socket.send(info_str.encode('utf-8'))
                         
-                        # Wait for acknowledgment
                         client_socket.recv(1024)
                         
-                        # Send image
                         if image:
                             client_socket.send(len(image).to_bytes(16, 'big'))
                             client_socket.sendall(image)
@@ -760,7 +762,7 @@ def handle_client(client_socket, address):
                     else:
                         client_socket.send(b'0')
             
-                elif request_code == "4":  # History request
+                elif request_code == "4":
                     history = get_user_purchase_history(username)
                     if history is not None:
                         client_socket.send(b'1')
@@ -770,7 +772,7 @@ def handle_client(client_socket, address):
                     else:
                         client_socket.send(b'0')
             
-                elif request_code == "5":  # Get unread messages
+                elif request_code == "5":
                     messages = get_unread_messages(username)
                     if messages:
                         client_socket.send(b'1')
@@ -780,7 +782,7 @@ def handle_client(client_socket, address):
                     else:
                         client_socket.send(b'0')
                 
-                elif request_code == "6":  # Get chat history with user
+                elif request_code == "6":
                     other_user = client_socket.recv(1024).decode('utf-8').strip('\x00').strip()
                     history = get_chat_history(username, other_user)
                     if history:
@@ -791,53 +793,48 @@ def handle_client(client_socket, address):
                     else:
                         client_socket.send(b'0')
                 
-                elif request_code == "7":  # Send message - simple store
+                elif request_code == "7":
                     try:
                         recipient = client_socket.recv(1024).decode('utf-8').strip('\x00').strip()
                         message = client_socket.recv(4096).decode('utf-8').strip('\x00').strip()
                         
-                        # Store the message
                         store_message(username, recipient, message)
                         
-                        # Send acknowledgment
                         client_socket.send(b'1')
                     except Exception as e:
                         print(f"Error in command 7: {e}")
                         client_socket.send(b'0')
                 
-                elif request_code == "8":  # Register P2P port (deprecated - user registered on login)
+                elif request_code == "8":
                     port = int(client_socket.recv(1024).decode('utf-8'))
-                    # Update port if needed
                     if username in online_users:
                         online_users[username]['port'] = port
                 
-                elif request_code == "17":  # Store chat message for history
+                elif request_code == "17":
                     recipient = client_socket.recv(1024).decode('utf-8')
                     message = client_socket.recv(4096).decode('utf-8')
                     
-                    # Store message in database
                     if store_message(username, recipient, message):
-                        client_socket.send(b'1')  # Success
+                        client_socket.send(b'1')
                     else:
-                        client_socket.send(b'0')  # Failed
+                        client_socket.send(b'0')
                 
-                elif request_code == "9":  # Logout
+                elif request_code == "9":
                     unregister_online_user(username)
                     break
                 
-                elif request_code == "10":  # Get conversations
+                elif request_code == "10":
                     conversations = get_conversations(username)
                     conv_json = json.dumps(conversations)
                     client_socket.send(len(conv_json).to_bytes(16, 'big'))
                     client_socket.sendall(conv_json.encode('utf-8'))
                 
-                elif request_code == "11":  # Get seller's products
+                elif request_code == "11":
                     seller = client_socket.recv(1024).decode('utf-8').strip('\x00')
                     products = get_seller_products(seller)
-                    # Convert to list of dicts for easier JSON handling
                     product_list = [{'name': p[0], 'rating': p[1], 'price': p[2], 'image': p[3]} for p in products]
                     products_json = json.dumps(product_list)
-                    client_socket.send(b'1')  # Send success response first
+                    client_socket.send(b'1')
                     client_socket.send(len(products_json).to_bytes(16, 'big'))
                     client_socket.sendall(products_json.encode('utf-8'))
                 
@@ -915,6 +912,7 @@ def handle_client(client_socket, address):
                             if profile.get('real_name') is None:
                                 profile['real_name'] = "User"
                             
+                            # ensure_ascii=False keeps unicode characters intact
                             profile_json = json.dumps(profile, ensure_ascii=False)
                             profile_bytes = profile_json.encode('utf-8')
                             
@@ -1008,6 +1006,8 @@ def handle_client(client_socket, address):
                         product_rating = rating_info['product_rating']
                         seller_rating = rating_info['seller_rating']
                         
+                        print(f"Processing rating: product={product_name}, seller={seller}, buyer={buyer}, rating={product_rating}")
+                        
                         conn_db = get_connection()
                         cursor = conn_db.cursor()
                         
@@ -1015,12 +1015,14 @@ def handle_client(client_socket, address):
                         cursor.execute("""INSERT INTO product_ratings (product_name, seller, buyer, rating, timestamp)
                                          VALUES (?, ?, ?, ?, datetime('now'))""",
                                       (product_name, seller, buyer, product_rating))
+                        print(f"Inserted into product_ratings table")
                         
                         # Add seller rating to buyer_ratings table (re-purpose for seller ratings)
                         # Note: buyer_ratings table is used for all user ratings
                         cursor.execute("""INSERT INTO buyer_ratings (buyer, rating, rated_by, timestamp)
                                          VALUES (?, ?, ?, datetime('now'))""",
                                       (seller, seller_rating, buyer))
+                        print(f"Inserted seller rating into buyer_ratings: seller={seller}, rating={seller_rating}")
                         
                         # Update average product rating for THIS SPECIFIC SELLER'S product only
                         cursor.execute("""SELECT rating, numberOfRating FROM productList 
@@ -1029,19 +1031,27 @@ def handle_client(client_socket, address):
                         prod = cursor.fetchone()
                         if prod:
                             current_rating, num_ratings = prod
+                            print(f"Current product stats: rating={current_rating}, count={num_ratings}")
                             new_num_ratings = num_ratings + 1
                             new_rating = ((current_rating * num_ratings) + product_rating) / new_num_ratings
+                            print(f"New product stats: rating={new_rating}, count={new_num_ratings}")
                             cursor.execute("""UPDATE productList SET rating = ?, numberOfRating = ? 
                                              WHERE product_name = ? AND user_name = ?""",
                                           (new_rating, new_num_ratings, product_name, seller))
+                            print(f"Updated productList with new rating")
+                        else:
+                            print(f"ERROR: Product not found in productList: {product_name} by {seller}")
                         
                         conn_db.commit()
                         cursor.close()
                         conn_db.close()
                         
+                        print(f"Rating saved successfully!")
                         client_socket.send(b'1')
                     except Exception as e:
                         print(f"Error saving ratings: {e}")
+                        import traceback
+                        traceback.print_exc()
                         client_socket.send(b'0')
                 
                 elif request_code == "23":  # Delete product (owner only)
@@ -1080,12 +1090,11 @@ def handle_client(client_socket, address):
                     try:
                         purchase_info = json.loads(data.decode('utf-8'))
                         product_name = purchase_info['product_name']
-                        seller = purchase_info['seller']  # REQUIRED - identifies which seller's product
+                        seller = purchase_info['seller']  # needed to identify correct seller's product
                         quantity = purchase_info.get('quantity', 1)
                         
                         print(f"Stock reduction request: product={product_name}, seller={seller}, buyer={username}, qty={quantity}")
                         
-                        # Decrement stock for this specific seller's product
                         remaining = decrement_product_stock(product_name, seller, quantity)
                         if remaining is not None and remaining >= 0:
                             # Record the purchase with seller info
@@ -1272,12 +1281,8 @@ def handle_client(client_socket, address):
 def main():
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    
-    port = int(input("Enter server port (1024-65535): "))
-    
-    if port < 1024 or port > 65535:
-        print("Invalid port")
-        return
+    #change port here and user if you want to change where server and clietns connect to
+    port = 10001
     
     server_socket.bind((socket.gethostbyname(socket.gethostname()), port))
     server_socket.listen(5)

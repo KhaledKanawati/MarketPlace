@@ -17,7 +17,7 @@ class MarketplaceGUI:
         self.root.configure(bg="#1a1a2e")
         
         self.client = None
-        self.client_lock = threading.Lock()
+        self.client_lock = threading.Lock()  # prevents race conditions on socket
         self.username = None
         self.current_user_port = None
         self.listening_server = None
@@ -28,7 +28,7 @@ class MarketplaceGUI:
         self.unread_messages = {}
         self.current_product_context = None
         self.received_proposals = {}
-        self.search_debounce_id = None
+        self.search_debounce_id = None  # timer for search delay
         
         self.bg_dark = "#1a1a2e"
         self.bg_medium = "#16213e"  # Navigation and header background
@@ -75,22 +75,11 @@ class MarketplaceGUI:
         
         ttk.Label(frame, text="🛒 Marketplace", font=('Segoe UI', 32, 'bold'), foreground=self.accent).pack(pady=30)
         
-        ttk.Label(frame, text="Port Number:", font=('Segoe UI', 12)).pack(pady=5)
-        port_entry = ttk.Entry(frame, width=30, font=('Segoe UI', 12))
-        port_entry.pack(pady=5, ipady=5)
+        ttk.Label(frame, text="Connecting to server...", font=('Segoe UI', 11), foreground=self.text_secondary).pack(pady=20)
         
-        def connect_to_server():
-            try:
-                port = int(port_entry.get())
-                if port < 1024 or port > 65535:
-                    messagebox.showerror("Invalid Port", "Port must be between 1024 and 65535")
-                    return
-                self.connect_server(port)
-            except ValueError:
-                messagebox.showerror("Invalid Input", "Please enter a valid port number")
-        
-        ttk.Button(frame, text="Connect", command=connect_to_server).pack(pady=10)
-        ttk.Label(frame, text="", foreground="gray", font=('Segoe UI', 9)).pack(pady=5)
+        # Auto-connect to port 10001
+        # CHANGE IF YOU WANT TO CONNECT TO DIFFERENT PORT, DO SO ALSO ON SERVER
+        self.root.after(100, lambda: self.connect_server(10001))
     
     def connect_server(self, port):
         """Establish connection to the marketplace server.
@@ -340,7 +329,7 @@ class MarketplaceGUI:
         
         nav_frame = tk.Frame(self.root, bg=self.bg_medium, height=70)
         nav_frame.pack(fill=tk.X)
-        nav_frame.pack_propagate(False)
+        nav_frame.pack_propagate(False)  # keep fixed height
         
         left_nav = tk.Frame(nav_frame, bg=self.bg_medium)
         left_nav.pack(side=tk.LEFT, padx=20, pady=15)
@@ -366,7 +355,7 @@ class MarketplaceGUI:
         self.messages_btn.pack()
         
         self.create_nav_button(right_nav, "+ Sell", self.show_sell_product).pack(side=tk.LEFT, padx=5)
-        self.create_nav_button(right_nav, "📜 History", self.show_history).pack(side=tk.LEFT, padx=5)
+        self.create_nav_button(right_nav, "📜 Sales", self.show_history).pack(side=tk.LEFT, padx=5)
         self.create_nav_button(right_nav, "👤 Profile", lambda: self.show_user_profile(self.username)).pack(side=tk.LEFT, padx=5)
         self.create_nav_button(right_nav, "Logout", self.logout).pack(side=tk.LEFT, padx=5)
         
@@ -381,7 +370,7 @@ class MarketplaceGUI:
                 fg=self.text_light).pack(side=tk.LEFT, padx=(0, 10))
         
         self.search_var = tk.StringVar()
-        self.search_var.trace('w', lambda *args: self.debounce_search())
+        self.search_var.trace('w', lambda *args: self.debounce_search())  # fires on every keystroke
         search_entry = tk.Entry(search_frame, textvariable=self.search_var,
                                font=('Segoe UI', 11),
                                bg='white',
@@ -552,6 +541,7 @@ class MarketplaceGUI:
         left_frame = tk.Frame(content, bg=self.card_bg)
         left_frame.pack(side=tk.LEFT, padx=(0, 15))
         
+        # placeholder while image loads
         placeholder = Image.new('RGB', (100, 100), color='#2d3748')
         photo = ImageTk.PhotoImage(placeholder)
         img_label = tk.Label(left_frame, image=photo, bg=self.card_bg)
@@ -560,6 +550,7 @@ class MarketplaceGUI:
         
         if image_b64:
             def load_image():
+                # runs in background so UI doesn't freeze
                 try:
                     image_data = base64.b64decode(image_b64)
                     img = Image.open(BytesIO(image_data))
@@ -1016,7 +1007,7 @@ class MarketplaceGUI:
         header_frame = tk.Frame(self.root, bg=self.bg_dark)
         header_frame.pack(fill=tk.X, padx=20, pady=20)
         
-        tk.Label(header_frame, text="Purchase History", 
+        tk.Label(header_frame, text="Sales History", 
                 font=('Segoe UI', 20, 'bold'),
                 bg=self.bg_dark,
                 fg=self.text_light).pack(side=tk.LEFT)
@@ -1071,7 +1062,7 @@ class MarketplaceGUI:
                                     bg=self.card_bg,
                                     fg=self.text_light).pack(anchor="w", padx=15, pady=10)
             else:
-                tk.Label(content_frame, text="📜 No purchase history", 
+                tk.Label(content_frame, text="📜 No sales history", 
                         font=('Segoe UI', 14),
                         bg=self.bg_dark,
                         fg=self.text_secondary).pack(pady=50)
@@ -1088,6 +1079,7 @@ class MarketplaceGUI:
         if self.search_debounce_id:
             self.root.after_cancel(self.search_debounce_id)
         
+        # wait 300ms after user stops typing
         self.search_debounce_id = self.root.after(300, self.filter_products)
     
     def filter_products(self):
@@ -1217,7 +1209,7 @@ class MarketplaceGUI:
             except Exception as e:
                 print(f"Error loading profile: {e}")
         
-        threading.Thread(target=load_current_profile, daemon=True).start()
+        threading.Thread(target=load_current_profile, daemon=True).start()  # daemon dies when window closes
         
         # Save button
         def save_profile():
