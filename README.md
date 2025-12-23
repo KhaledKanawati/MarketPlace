@@ -10,7 +10,7 @@ python MarketplaceGUI.py    # Terminal 2
 
 ## About
 
-Online marketplace with chat, product listings, and transaction management built with Python and Tkinter.
+Online marketplace with chat, product listings, and transaction management built with Python, used as a marketplace for AUB students.
 
 **Features:** User authentication, product browsing, real-time chat, purchase proposals, ratings system
 
